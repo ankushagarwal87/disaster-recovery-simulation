@@ -44,15 +44,15 @@ interface StrategyMetrics {
 
 const STRATEGIES: Record<DRStrategy, StrategyMetrics> = {
   'backup-restore': {
-    rto: 'Hours',
-    rpo: '24 Hours',
+    rto: 'Days',
+    rpo: 'Hours',
     cost: 1,
     description: 'Data is backed up and restored from off-site storage. Infrastructure is created only after a disaster.',
     pros: ['Lowest cost', 'Simple to implement'],
     cons: ['High RTO/RPO', 'Manual recovery steps'],
   },
   'pilot-light': {
-    rto: 'Minutes',
+    rto: 'Hours',
     rpo: 'Minutes',
     cost: 3,
     description: 'Core data is replicated. Minimal infrastructure (database) is running. App servers are provisioned during recovery.',
@@ -60,7 +60,7 @@ const STRATEGIES: Record<DRStrategy, StrategyMetrics> = {
     cons: ['Requires automation for scaling', 'Some downtime during spin-up'],
   },
   'warm-standby': {
-    rto: 'Seconds',
+    rto: 'Minutes',
     rpo: 'Seconds',
     cost: 6,
     description: 'A scaled-down but functional version of the environment is always running in the secondary region.',
@@ -126,21 +126,25 @@ const RegionBox = ({
   status, 
   isActive, 
   isPrimary, 
+  displayRole,
   strategy, 
-  isDisaster,
+  isRegionDown,
+  isSystemDisaster,
   recoveryProgress
 }: { 
   name: string; 
   status: 'healthy' | 'down' | 'standby' | 'provisioning'; 
   isActive: boolean;
   isPrimary: boolean;
+  displayRole: 'Primary' | 'Secondary';
   strategy: DRStrategy;
-  isDisaster: boolean;
+  isRegionDown: boolean;
+  isSystemDisaster: boolean;
   recoveryProgress: number;
 }) => {
   const getStatusColor = () => {
     switch (status) {
-      case 'healthy': return 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5';
+      case 'healthy': return displayRole === 'Primary' ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' : 'text-blue-400 border-blue-500/30 bg-blue-500/5';
       case 'down': return 'text-rose-400 border-rose-500/30 bg-rose-500/5';
       case 'standby': return 'text-amber-400 border-amber-500/30 bg-amber-500/5';
       case 'provisioning': return 'text-blue-400 border-blue-500/30 bg-blue-500/5 animate-pulse';
@@ -149,24 +153,41 @@ const RegionBox = ({
   };
 
   const getServerCount = () => {
-    if (isPrimary) return isDisaster ? 0 : 4;
+    if (isPrimary) return isRegionDown ? 0 : 4;
     
-    if (isDisaster) {
+    if (recoveryProgress > 0) {
       if (recoveryProgress === 100) return 4;
       if (strategy === 'active-active') return 4;
       if (strategy === 'warm-standby') return 1 + Math.floor((recoveryProgress / 100) * 3);
-      if (strategy === 'pilot-light') return Math.floor((recoveryProgress / 100) * 4);
-      if (strategy === 'backup-restore') return Math.floor((recoveryProgress / 100) * 4);
-      return 0;
+      // For strategies that start from 0, ensure at least 1 shows up early in provisioning
+      const base = (strategy === 'pilot-light' || strategy === 'backup-restore') && recoveryProgress > 10 ? 1 : 0;
+      return Math.max(base, Math.floor((recoveryProgress / 100) * 4));
     }
 
     if (strategy === 'active-active') return 4;
     if (strategy === 'warm-standby') return 1;
-    if (strategy === 'pilot-light') return 0;
     return 0;
   };
 
+  const isDatabaseProvisioned = () => {
+    if (isPrimary) return !isRegionDown;
+    if (strategy === 'backup-restore') {
+      return recoveryProgress > 30;
+    }
+    return true; // Pilot Light, Warm Standby, Active-Active have DBs running
+  };
+
+  const isLoadBalancerProvisioned = () => {
+    if (isPrimary) return !isRegionDown;
+    if (strategy === 'backup-restore') {
+      return recoveryProgress > 20;
+    }
+    return true;
+  };
+
   const serverCount = getServerCount();
+  const dbProvisioned = isDatabaseProvisioned();
+  const lbProvisioned = isLoadBalancerProvisioned();
 
   return (
     <div className={cn(
@@ -175,12 +196,22 @@ const RegionBox = ({
       isActive ? "ring-2 ring-offset-4 ring-offset-zinc-950 ring-current" : "opacity-60"
     )}>
       {/* User Traffic Visualization */}
-      <TrafficFlow from="user" to={name} active={isActive && status === 'healthy'} color={isPrimary ? "bg-emerald-400" : "bg-blue-400"} />
+      <TrafficFlow from="user" to={name} active={isActive && status === 'healthy'} color={displayRole === 'Primary' ? "bg-emerald-400" : "bg-blue-400"} />
 
       <div className="flex justify-between items-center mb-6">
-        <div className="flex items-center gap-2">
-          <Cloud className="w-5 h-5" />
-          <h3 className="font-bold text-lg">{name}</h3>
+        <div className="flex flex-col">
+          <div className="flex items-center gap-2 mb-1">
+            <span className={cn(
+              "text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-md",
+              displayRole === 'Primary' ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
+            )}>
+              {displayRole} Region
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Cloud className="w-5 h-5" />
+            <h3 className="font-bold text-lg">{name}</h3>
+          </div>
         </div>
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/20 border border-current/20 text-[10px] uppercase font-bold tracking-widest">
           {status === 'healthy' && <CheckCircle2 className="w-3 h-3" />}
@@ -191,7 +222,10 @@ const RegionBox = ({
 
       <div className="space-y-4">
         {/* Load Balancer */}
-        <div className="flex flex-col items-center gap-1">
+        <div className={cn(
+          "flex flex-col items-center gap-1 transition-all duration-500",
+          !lbProvisioned ? "opacity-5 grayscale border-dashed" : "opacity-100"
+        )}>
           <div className="w-full h-10 border border-current/20 rounded-lg flex items-center justify-center bg-black/10">
             <Activity className="w-4 h-4 mr-2" />
             <span className="text-xs font-mono">Load Balancer</span>
@@ -218,22 +252,27 @@ const RegionBox = ({
 
         {/* Database */}
         <div className={cn(
-          "h-20 border border-current/20 rounded-lg flex flex-col items-center justify-center bg-black/10 relative overflow-hidden",
-          (isPrimary && isDisaster) && "opacity-20 grayscale",
-          (!isPrimary && strategy === 'backup-restore' && !isDisaster) && "opacity-5 grayscale border-dashed"
+          "h-20 border border-current/20 rounded-lg flex flex-col items-center justify-center bg-black/10 relative overflow-hidden transition-all duration-500",
+          !dbProvisioned ? "opacity-5 grayscale border-dashed" : "opacity-100"
         )}>
           <Database className="w-5 h-5 mb-1" />
           <span className="text-[10px] font-mono">RDS Cluster</span>
           {/* Replication Overlay */}
           {!isPrimary && strategy !== 'backup-restore' && (
             <div className="absolute inset-0 bg-current/5 flex items-center justify-center">
-              <RefreshCw className={cn("w-3 h-3 animate-spin-slow opacity-40", status === 'down' && "hidden")} />
+              <RefreshCw className={cn("w-3 h-3 animate-spin-slow opacity-40", (isRegionDown || status === 'down') && "hidden")} />
+            </div>
+          )}
+          {/* Provisioning Overlay */}
+          {!isPrimary && strategy === 'backup-restore' && isSystemDisaster && !dbProvisioned && (
+            <div className="absolute inset-0 bg-blue-500/10 flex items-center justify-center">
+              <RefreshCw className="w-4 h-4 animate-spin text-blue-400 opacity-60" />
             </div>
           )}
         </div>
       </div>
 
-      {isPrimary && isDisaster && (
+      {isPrimary && isRegionDown && (
         <div className="absolute inset-0 bg-rose-950/20 backdrop-blur-[1px] flex items-center justify-center rounded-2xl">
           <div className="bg-rose-500 text-white px-4 py-2 rounded-full font-bold shadow-lg flex items-center gap-2">
             <AlertTriangle className="w-4 h-4" />
@@ -246,30 +285,56 @@ const RegionBox = ({
 };
 
 
+
 export default function App() {
   const [strategy, setStrategy] = useState<DRStrategy>('backup-restore');
   const [isDisaster, setIsDisaster] = useState(false);
   const [recoveryProgress, setRecoveryProgress] = useState(0);
   const [isRecovering, setIsRecovering] = useState(false);
-  const [logs, setLogs] = useState<string[]>(["System initialized. Primary region active."]);
+  const [trafficTarget, setTrafficTarget] = useState<'primary' | 'secondary'>('primary');
+  const [isPrimaryFixed, setIsPrimaryFixed] = useState(true);
+  const [isPrimaryFixing, setIsPrimaryFixing] = useState(false);
+  const [isSyncingBack, setIsSyncingBack] = useState(false);
+  const [logs, setLogs] = useState<{id: string, timestamp: string, message: string}[]>([]);
 
-  const addLog = (msg: string) => {
-    setLogs(prev => [msg, ...prev].slice(0, 5));
+  const addLog = (message: string) => {
+    setLogs(prev => [{
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      message
+    }, ...prev].slice(0, 50));
   };
+
+  useEffect(() => {
+    if (logs.length === 0) {
+      addLog("System initialized. Primary region active.");
+    }
+  }, []);
 
   const handleDisaster = () => {
     setIsDisaster(true);
-    setIsRecovering(false);
-    setRecoveryProgress(0);
+    setIsPrimaryFixed(false);
+    setIsPrimaryFixing(false);
+    setIsSyncingBack(false);
+    
     addLog("CRITICAL: Primary region (us-east-1) is DOWN.");
 
     // Automatic failover for high-availability strategies
-    if (strategy === 'active-active') {
-      setRecoveryProgress(100);
-      addLog("Active-Active: Traffic automatically shifted to us-west-2.");
-    } else if (strategy === 'warm-standby') {
-      addLog("Warm Standby: Secondary region is functional. Scaling up to full capacity...");
-      setIsRecovering(true);
+    if (strategy === 'active-active' || strategy === 'warm-standby' || strategy === 'pilot-light') {
+      setTrafficTarget('secondary');
+      addLog(`Failover: Traffic automatically shifted to us-west-2 (${strategy.replace('-', ' ')}).`);
+      
+      if (strategy === 'active-active') {
+        setRecoveryProgress(100);
+        setIsRecovering(false);
+      } else {
+        setRecoveryProgress(0);
+        setIsRecovering(true);
+      }
+    } else {
+      setRecoveryProgress(0);
+      setIsRecovering(false);
+      addLog("Backup & Restore: Manual recovery required to provision secondary region.");
     }
   };
 
@@ -278,20 +343,71 @@ export default function App() {
     addLog(`Initiating recovery using ${STRATEGIES[strategy].rto} strategy...`);
   };
 
+  const handleFixPrimary = () => {
+    setIsPrimaryFixing(true);
+    setIsSyncingBack(true);
+    addLog("Repairing us-east-1: Synchronizing state and verifying infrastructure...");
+    addLog("Failback Sync: Replicating delta data from us-west-2 back to us-east-1.");
+    
+    setTimeout(() => {
+      setIsPrimaryFixed(true);
+      setIsPrimaryFixing(false);
+      setIsDisaster(false);
+      addLog("Primary region (us-east-1) has been repaired and is now HEALTHY.");
+      addLog("Ready for Failback: Data is synchronized. Traffic can now be shifted back.");
+    }, 3000);
+  };
+
+  const handleSwitchover = (target: 'primary' | 'secondary') => {
+    setTrafficTarget(target);
+    addLog(`DNS Switchover: Traffic manually routed to ${target === 'primary' ? 'us-east-1' : 'us-west-2'}.`);
+    
+    if (target === 'primary') {
+      setIsSyncingBack(false);
+      if (strategy === 'backup-restore' || strategy === 'pilot-light') {
+        setRecoveryProgress(0);
+        addLog(`${strategy === 'backup-restore' ? 'Backup & Restore' : 'Pilot Light'}: Secondary infrastructure decommissioned.`);
+      } else if (strategy === 'warm-standby') {
+        setRecoveryProgress(0);
+        addLog("Warm Standby: Secondary region scaled back to standby capacity.");
+      }
+    }
+  };
+
   useEffect(() => {
     if (isRecovering && recoveryProgress < 100) {
       const timer = setTimeout(() => {
-        setRecoveryProgress(prev => Math.min(prev + 5, 100));
+        setRecoveryProgress(prev => {
+          const next = Math.min(prev + 5, 100);
+          if (next === 100) {
+            setIsRecovering(false);
+            addLog("Recovery complete. Secondary region is now fully operational.");
+            
+            // For backup-restore, traffic shifts after recovery is complete
+            if (strategy === 'backup-restore') {
+              setTrafficTarget('secondary');
+              addLog("DNS Update: Traffic shifted to us-west-2.");
+            }
+          }
+          return next;
+        });
       }, strategy === 'active-active' ? 50 : strategy === 'warm-standby' ? 100 : strategy === 'pilot-light' ? 200 : 400);
       return () => clearTimeout(timer);
-    } else if (recoveryProgress === 100) {
-      setIsRecovering(false);
-      addLog("Recovery complete. Secondary region is now PRIMARY.");
     }
   }, [isRecovering, recoveryProgress, strategy]);
 
+  const handleReset = () => {
+    setIsDisaster(false);
+    setIsRecovering(false);
+    setRecoveryProgress(0);
+    setTrafficTarget('primary');
+    setIsPrimaryFixed(true);
+    setLogs([]);
+    addLog("Simulation reset to baseline state.");
+  };
+
   const secondaryStatus = useMemo(() => {
-    if (isDisaster) {
+    if (isDisaster || !isPrimaryFixed || isPrimaryFixing) {
       if (recoveryProgress === 100) return 'healthy';
       if (isRecovering) return 'provisioning';
       
@@ -301,13 +417,16 @@ export default function App() {
       return 'down';
     }
     
+    // Primary is fixed, but if we are still using secondary as the target
+    if (trafficTarget === 'secondary' && recoveryProgress === 100) return 'healthy';
+
     if (strategy === 'active-active') return 'healthy';
     if (strategy === 'warm-standby') return 'standby';
     if (strategy === 'pilot-light') return 'standby';
     return 'down';
-  }, [isDisaster, recoveryProgress, isRecovering, strategy]);
+  }, [isDisaster, recoveryProgress, isRecovering, strategy, isPrimaryFixed, isPrimaryFixing, trafficTarget]);
 
-  const primaryStatus = isDisaster ? 'down' : 'healthy';
+  const primaryStatus = isPrimaryFixing ? 'provisioning' : (isPrimaryFixed ? 'healthy' : 'down');
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-emerald-500/30">
@@ -366,7 +485,7 @@ export default function App() {
                   </p>
                 </div>
                 <div className="flex gap-4">
-                  {!isDisaster ? (
+                  {!isDisaster && isPrimaryFixed && trafficTarget === 'primary' ? (
                     <button 
                       onClick={handleDisaster}
                       className="bg-rose-500 hover:bg-rose-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-rose-500/20"
@@ -375,22 +494,61 @@ export default function App() {
                       SIMULATE DISASTER
                     </button>
                   ) : (
-                    <button 
-                      onClick={handleRecover}
-                      disabled={isRecovering || recoveryProgress === 100}
-                      className={cn(
-                        "px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg",
-                        recoveryProgress === 100 
-                          ? "bg-emerald-500 text-white cursor-default" 
-                          : "bg-blue-500 hover:bg-blue-600 text-white shadow-blue-500/20"
+                    <div className="flex flex-wrap gap-3">
+                      {isPrimaryFixing && (
+                        <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 text-sm font-bold animate-pulse">
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          REPAIRING PRIMARY...
+                        </div>
                       )}
-                    >
-                      {recoveryProgress === 100 ? (
-                        <><CheckCircle2 className="w-4 h-4" /> RECOVERED</>
-                      ) : (
-                        <><RefreshCw className={cn("w-4 h-4", isRecovering && "animate-spin")} /> {isRecovering ? 'RECOVERING...' : 'START RECOVERY'}</>
+
+                      {!isPrimaryFixed && !isPrimaryFixing && (
+                        <button 
+                          onClick={handleFixPrimary}
+                          className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-emerald-500/20"
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                          FIX PRIMARY REGION
+                        </button>
                       )}
-                    </button>
+
+                      {isDisaster && !isRecovering && recoveryProgress < 100 && strategy !== 'active-active' && (
+                        <button 
+                          onClick={handleRecover}
+                          className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-blue-500/20"
+                        >
+                          <RefreshCw className="w-4 h-4" />
+                          START RECOVERY
+                        </button>
+                      )}
+
+                      {isPrimaryFixed && trafficTarget === 'secondary' && (
+                        <button 
+                          onClick={() => handleSwitchover('primary')}
+                          className="bg-amber-500 hover:bg-amber-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-amber-500/20"
+                        >
+                          <ArrowRight className="w-4 h-4 rotate-180" />
+                          SWITCHOVER TO PRIMARY
+                        </button>
+                      )}
+
+                      {recoveryProgress === 100 && trafficTarget === 'primary' && (
+                        <button 
+                          onClick={() => handleSwitchover('secondary')}
+                          className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95 shadow-lg shadow-blue-500/20"
+                        >
+                          <ArrowRight className="w-4 h-4" />
+                          SWITCHOVER TO SECONDARY
+                        </button>
+                      )}
+
+                      <button 
+                        onClick={handleReset}
+                        className="bg-zinc-800 hover:bg-zinc-700 text-white px-6 py-3 rounded-xl font-bold transition-all active:scale-95"
+                      >
+                        RESET
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -398,46 +556,74 @@ export default function App() {
               {/* Architecture Diagram */}
               <div className="relative flex flex-col md:flex-row gap-12 items-center justify-center py-10">
                 <RegionBox 
-                  name="us-east-1 (Primary)" 
+                  name="us-east-1" 
                   status={primaryStatus} 
-                  isActive={!isDisaster || (strategy === 'active-active' && recoveryProgress < 100)}
+                  isActive={strategy === 'active-active' ? primaryStatus === 'healthy' : trafficTarget === 'primary'}
                   isPrimary={true}
+                  displayRole={strategy === 'active-active' ? 'Primary' : (trafficTarget === 'primary' ? 'Primary' : 'Secondary')}
                   strategy={strategy}
-                  isDisaster={isDisaster}
+                  isRegionDown={!isPrimaryFixed}
+                  isSystemDisaster={isDisaster}
                   recoveryProgress={recoveryProgress}
                 />
 
                 {/* Data Flow / Replication */}
                 <div className="flex flex-col items-center gap-4">
                   <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest bg-zinc-800 px-3 py-1 rounded-full border border-white/5">
-                    {strategy === 'backup-restore' ? 'S3 Backup' : 'Replication'}
+                    {isSyncingBack ? 'Failback Sync' : (strategy === 'active-active' ? 'Bi-directional Sync' : (strategy === 'backup-restore' ? 'S3 Backup' : 'Replication'))}
                   </div>
                   <div className="relative w-12 h-px bg-zinc-800">
-                    <motion.div 
-                      animate={{ x: [0, 48] }}
-                      transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
-                      className={cn(
-                        "absolute top-0 left-0 w-2 h-px bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]",
-                        isDisaster && strategy !== 'active-active' && "hidden"
-                      )}
-                    />
+                    {strategy === 'active-active' ? (
+                      <>
+                        <motion.div 
+                          animate={{ x: [0, 48] }}
+                          transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                          className="absolute top-0 left-0 w-2 h-px bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+                        />
+                        <motion.div 
+                          animate={{ x: [48, 0] }}
+                          transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                          className="absolute top-0 left-0 w-2 h-px bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+                        />
+                      </>
+                    ) : (
+                      <motion.div 
+                        animate={{ x: isSyncingBack ? [48, 0] : [0, 48] }}
+                        transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                        className={cn(
+                          "absolute top-0 left-0 w-2 h-px bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]",
+                          !isSyncingBack && !isPrimaryFixed && strategy !== 'active-active' && "hidden"
+                        )}
+                      />
+                    )}
                   </div>
-                  <ArrowRight className={cn("w-5 h-5 text-zinc-700", !isDisaster && "text-emerald-500")} />
+                  {strategy === 'active-active' ? (
+                    <div className="flex gap-1">
+                      <ArrowRight className="w-4 h-4 text-emerald-500" />
+                      <ArrowRight className="w-4 h-4 text-emerald-500 rotate-180" />
+                    </div>
+                  ) : isSyncingBack ? (
+                    <ArrowRight className="w-5 h-5 text-blue-500 rotate-180" />
+                  ) : (
+                    <ArrowRight className={cn("w-5 h-5 text-zinc-700", isPrimaryFixed && "text-emerald-500")} />
+                  )}
                 </div>
 
                 <RegionBox 
-                  name="us-west-2 (Secondary)" 
+                  name="us-west-2" 
                   status={secondaryStatus} 
-                  isActive={isDisaster || strategy === 'active-active'}
+                  isActive={strategy === 'active-active' ? secondaryStatus === 'healthy' : trafficTarget === 'secondary'}
                   isPrimary={false}
+                  displayRole={strategy === 'active-active' ? 'Primary' : (trafficTarget === 'secondary' ? 'Primary' : 'Secondary')}
                   strategy={strategy}
-                  isDisaster={false}
+                  isRegionDown={false}
+                  isSystemDisaster={isDisaster}
                   recoveryProgress={recoveryProgress}
                 />
               </div>
 
-              {/* Warm Standby vs Pilot Light Deep Dive */}
-              {strategy === 'warm-standby' && (
+              {/* Strategy Comparison Deep Dive */}
+              {(strategy === 'warm-standby' || strategy === 'pilot-light') && (
                 <motion.section 
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -445,46 +631,52 @@ export default function App() {
                 >
                   <h3 className="text-xl font-bold text-blue-400 mb-4 flex items-center gap-2">
                     <Zap className="w-5 h-5" />
-                    Warm Standby vs. Pilot Light
+                    {strategy === 'warm-standby' ? 'Warm Standby vs. Pilot Light' : 'Pilot Light vs. Backup & Restore'}
                   </h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                     <div className="space-y-4">
                       <h4 className="font-bold text-white flex items-center gap-2">
                         <div className="w-2 h-2 rounded-full bg-blue-500" />
-                        Warm Standby (This Strategy)
+                        {strategy === 'warm-standby' ? 'Warm Standby' : 'Pilot Light'}
                       </h4>
                       <p className="text-sm text-zinc-400 leading-relaxed">
-                        A scaled-down version of your fully functional environment is always running in the secondary region. 
-                        Traffic can be shifted almost immediately.
+                        {strategy === 'warm-standby' 
+                          ? "A scaled-down version of your environment is always running. Traffic shifts almost immediately."
+                          : "Critical data is replicated, but app servers are NOT running. They are provisioned during recovery."}
                       </p>
                       <div className="grid grid-cols-2 gap-4">
                         <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                           <p className="text-[10px] text-zinc-500 uppercase font-bold">RTO</p>
-                          <p className="text-sm font-bold text-emerald-400">Seconds</p>
+                          <p className="text-sm font-bold text-emerald-400">{STRATEGIES[strategy].rto}</p>
                         </div>
                         <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                           <p className="text-[10px] text-zinc-500 uppercase font-bold">Cost</p>
-                          <p className="text-sm font-bold text-amber-400">Higher (6/10)</p>
+                          <p className="text-sm font-bold text-amber-400">{STRATEGIES[strategy].cost}/10</p>
                         </div>
                       </div>
                     </div>
                     <div className="space-y-4">
                       <h4 className="font-bold text-zinc-400 flex items-center gap-2">
                         <div className="w-2 h-2 rounded-full bg-zinc-600" />
-                        Pilot Light
+                        {strategy === 'warm-standby' ? 'Pilot Light' : 'Backup & Restore'}
                       </h4>
                       <p className="text-sm text-zinc-500 leading-relaxed">
-                        Only the critical data is replicated. Application servers are NOT running and must be provisioned 
-                        from AMIs or code during recovery.
+                        {strategy === 'warm-standby'
+                          ? "Only critical data is replicated. App servers must be provisioned from AMIs or code."
+                          : "Lowest cost option. Everything is restored from backups after a disaster occurs."}
                       </p>
                       <div className="grid grid-cols-2 gap-4">
                         <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                           <p className="text-[10px] text-zinc-500 uppercase font-bold">RTO</p>
-                          <p className="text-sm font-bold text-zinc-400">Minutes</p>
+                          <p className="text-sm font-bold text-zinc-400">
+                            {strategy === 'warm-standby' ? STRATEGIES['pilot-light'].rto : STRATEGIES['backup-restore'].rto}
+                          </p>
                         </div>
                         <div className="bg-black/20 p-3 rounded-xl border border-white/5">
                           <p className="text-[10px] text-zinc-500 uppercase font-bold">Cost</p>
-                          <p className="text-sm font-bold text-emerald-400">Lower (3/10)</p>
+                          <p className="text-sm font-bold text-emerald-400">
+                            {strategy === 'warm-standby' ? STRATEGIES['pilot-light'].cost : STRATEGIES['backup-restore'].cost}/10
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -634,13 +826,13 @@ export default function App() {
                 </div>
               </div>
               <div className="space-y-2 h-40 overflow-y-auto scrollbar-hide">
-                {logs.map((log, i) => (
-                  <div key={i} className={cn(
+                {logs.map((log) => (
+                  <div key={log.id} className={cn(
                     "flex gap-2",
-                    i === 0 ? "text-zinc-100" : "text-zinc-600"
+                    log.id === logs[0]?.id ? "text-zinc-100" : "text-zinc-600"
                   )}>
-                    <span className="text-zinc-700">[{new Date().toLocaleTimeString([], {hour12: false})}]</span>
-                    <span>{log}</span>
+                    <span className="text-zinc-700">[{log.timestamp}]</span>
+                    <span>{log.message}</span>
                   </div>
                 ))}
               </div>
