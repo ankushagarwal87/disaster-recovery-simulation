@@ -1,0 +1,5 @@
+{
+  "name": "AWS DR Strategy Simulator",
+  "description": "An interactive simulator to experiment with and visualize the four AWS Disaster Recovery strategies: Backup & Restore, Pilot Light, Warm Standby, and Multi-site Active-Active.",
+  "requestFramePermissions": []
+}
